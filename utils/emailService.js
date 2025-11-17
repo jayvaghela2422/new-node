@@ -1,19 +1,32 @@
 import nodemailer from "nodemailer";
 
 // Create a transporter with more reliable configuration
-const createTransporter = () => {
+// Tries port 587 first, falls back to 465 if needed
+// Can be forced to use a specific port via EMAIL_PORT environment variable
+const createTransporter = (usePort465 = false) => {
   try {
     // Validate environment variables
     if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
       throw new Error('EMAIL_USER and EMAIL_PASSWORD environment variables must be set');
     }
 
-    console.log('Creating email transporter for:', process.env.EMAIL_USER);
+    // Allow forcing a specific port via environment variable
+    let port, secure;
+    if (process.env.EMAIL_PORT) {
+      port = parseInt(process.env.EMAIL_PORT);
+      secure = port === 465;
+      console.log(`Using forced port from EMAIL_PORT environment variable: ${port}`);
+    } else {
+      port = usePort465 ? 465 : 587;
+      secure = usePort465;
+    }
+    
+    console.log(`Creating email transporter for: ${process.env.EMAIL_USER} on port ${port} (secure: ${secure})`);
 
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 587,
-      secure: false, // true for 465, false for other ports
+      port: port,
+      secure: secure, // true for 465, false for 587
       auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASSWORD, // Use App Password here
@@ -21,9 +34,9 @@ const createTransporter = () => {
       tls: {
         rejectUnauthorized: false // Only for development/testing
       },
-      connectionTimeout: 10000, // 10 seconds
-      greetingTimeout: 10000, // 10 seconds
-      socketTimeout: 10000, // 10 seconds
+      connectionTimeout: 20000, // 20 seconds for server environments
+      greetingTimeout: 20000, // 20 seconds
+      socketTimeout: 20000, // 20 seconds
       pool: false // Disable pooling for server environments to avoid connection issues
     });
     
@@ -58,28 +71,53 @@ export const sendVerificationEmail = async (email, code, name) => {
       throw new Error('Email service is not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.');
     }
 
-    // Create and verify transporter
-    transporter = createTransporter();
+    // Create and verify transporter - try port 587 first, fallback to 465
+    // Skip fallback if EMAIL_PORT is explicitly set
+    let connectionFailed = false;
+    let lastError = null;
+    const useForcedPort = !!process.env.EMAIL_PORT;
     
-    // Verify connection before sending (with timeout)
+    // Try port 587 first (or forced port)
     try {
-      console.log('Verifying SMTP connection...');
+      transporter = createTransporter(false);
+      console.log(`Attempting connection on port ${transporter.options.port}...`);
+      
+      // Verify connection with timeout
       await Promise.race([
         transporter.verify(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('SMTP verification timeout')), 10000)
+          setTimeout(() => reject(new Error('SMTP verification timeout')), 15000)
         )
       ]);
-      console.log('SMTP server connection verified');
+      console.log(`SMTP server connection verified on port ${transporter.options.port}`);
     } catch (verifyError) {
-      console.error('SMTP verification failed:', {
-        message: verifyError.message,
-        code: verifyError.code,
-        command: verifyError.command,
-        response: verifyError.response
-      });
-      // Don't throw here - try to send anyway as verify can fail but send might work
-      console.warn('SMTP verification failed, but attempting to send email anyway...');
+      console.warn(`Port ${transporter?.options?.port || 587} connection failed:`, verifyError.message);
+      lastError = verifyError;
+      connectionFailed = true;
+      
+      // Try port 465 as fallback only if EMAIL_PORT is not set
+      if (!useForcedPort) {
+        try {
+          console.log('Attempting fallback connection on port 465...');
+          transporter = createTransporter(true);
+          
+          await Promise.race([
+            transporter.verify(),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('SMTP verification timeout')), 15000)
+            )
+          ]);
+          console.log('SMTP server connection verified on port 465');
+          connectionFailed = false;
+        } catch (fallbackError) {
+          console.error('Port 465 connection also failed:', fallbackError.message);
+          lastError = fallbackError;
+          // Don't throw here - try to send anyway as verify can fail but send might work
+          console.warn('SMTP verification failed on both ports, but attempting to send email anyway...');
+        }
+      } else {
+        console.warn('Using forced port, skipping fallback. Attempting to send email anyway...');
+      }
     }
 
     const mailOptions = {
@@ -109,20 +147,54 @@ export const sendVerificationEmail = async (email, code, name) => {
 
     console.log('Sending verification email to:', email);
     
-    // Send email with timeout
-    const sendPromise = transporter.sendMail(mailOptions);
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
-    );
+    // Send email with timeout - try sending, if fails try alternative port
+    let sendSuccess = false;
+    let sendError = null;
     
-    const info = await Promise.race([sendPromise, timeoutPromise]);
-    console.log('Email sent successfully:', info.messageId);
-    
-    return { 
-      success: true,
-      messageId: info.messageId,
-      response: info.response
-    };
+    try {
+      const sendPromise = transporter.sendMail(mailOptions);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
+      );
+      
+      const info = await Promise.race([sendPromise, timeoutPromise]);
+      console.log('Email sent successfully:', info.messageId);
+      sendSuccess = true;
+      return { 
+        success: true,
+        messageId: info.messageId,
+        response: info.response
+      };
+    } catch (sendErr) {
+      sendError = sendErr;
+      console.error('Email send failed on current port:', sendErr.message);
+      
+      // If we haven't tried port 465 yet and EMAIL_PORT is not set, try it now
+      if ((!connectionFailed || !transporter || transporter.options.port === 587) && !process.env.EMAIL_PORT) {
+        try {
+          console.log('Retrying email send on port 465...');
+          transporter = createTransporter(true);
+          
+          const sendPromise = transporter.sendMail(mailOptions);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
+          );
+          
+          const info = await Promise.race([sendPromise, timeoutPromise]);
+          console.log('Email sent successfully on port 465:', info.messageId);
+          return { 
+            success: true,
+            messageId: info.messageId,
+            response: info.response
+          };
+        } catch (retryErr) {
+          console.error('Email send also failed on port 465:', retryErr.message);
+          throw sendErr; // Throw original error
+        }
+      } else {
+        throw sendErr;
+      }
+    }
   } catch (error) {
     const errorDetails = {
       message: error.message,
@@ -183,28 +255,53 @@ export const sendPasswordResetEmail = async (email, code, name) => {
       throw new Error('Email service is not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.');
     }
 
-    // Create and verify transporter
-    transporter = createTransporter();
+    // Create and verify transporter - try port 587 first, fallback to 465
+    // Skip fallback if EMAIL_PORT is explicitly set
+    let connectionFailed = false;
+    let lastError = null;
+    const useForcedPort = !!process.env.EMAIL_PORT;
     
-    // Verify connection before sending (with timeout)
+    // Try port 587 first (or forced port)
     try {
-      console.log('Verifying SMTP connection for password reset...');
+      transporter = createTransporter(false);
+      console.log(`Attempting connection on port ${transporter.options.port} for password reset...`);
+      
+      // Verify connection with timeout
       await Promise.race([
         transporter.verify(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('SMTP verification timeout')), 10000)
+          setTimeout(() => reject(new Error('SMTP verification timeout')), 15000)
         )
       ]);
-      console.log('SMTP server connection verified for password reset');
+      console.log(`SMTP server connection verified on port ${transporter.options.port}`);
     } catch (verifyError) {
-      console.error('SMTP verification failed:', {
-        message: verifyError.message,
-        code: verifyError.code,
-        command: verifyError.command,
-        response: verifyError.response
-      });
-      // Don't throw here - try to send anyway as verify can fail but send might work
-      console.warn('SMTP verification failed, but attempting to send email anyway...');
+      console.warn(`Port ${transporter?.options?.port || 587} connection failed:`, verifyError.message);
+      lastError = verifyError;
+      connectionFailed = true;
+      
+      // Try port 465 as fallback only if EMAIL_PORT is not set
+      if (!useForcedPort) {
+        try {
+          console.log('Attempting fallback connection on port 465...');
+          transporter = createTransporter(true);
+          
+          await Promise.race([
+            transporter.verify(),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('SMTP verification timeout')), 15000)
+            )
+          ]);
+          console.log('SMTP server connection verified on port 465');
+          connectionFailed = false;
+        } catch (fallbackError) {
+          console.error('Port 465 connection also failed:', fallbackError.message);
+          lastError = fallbackError;
+          // Don't throw here - try to send anyway as verify can fail but send might work
+          console.warn('SMTP verification failed on both ports, but attempting to send email anyway...');
+        }
+      } else {
+        console.warn('Using forced port, skipping fallback. Attempting to send email anyway...');
+      }
     }
 
     const mailOptions = {
@@ -233,20 +330,49 @@ export const sendPasswordResetEmail = async (email, code, name) => {
 
     console.log('Sending password reset email to:', email);
     
-    // Send email with timeout
-    const sendPromise = transporter.sendMail(mailOptions);
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
-    );
-    
-    const info = await Promise.race([sendPromise, timeoutPromise]);
-    console.log('Password reset email sent successfully:', info.messageId);
-    
-    return { 
-      success: true,
-      messageId: info.messageId,
-      response: info.response
-    };
+    // Send email with timeout - try sending, if fails try alternative port
+    try {
+      const sendPromise = transporter.sendMail(mailOptions);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
+      );
+      
+      const info = await Promise.race([sendPromise, timeoutPromise]);
+      console.log('Password reset email sent successfully:', info.messageId);
+      return { 
+        success: true,
+        messageId: info.messageId,
+        response: info.response
+      };
+    } catch (sendErr) {
+      console.error('Email send failed on current port:', sendErr.message);
+      
+      // If we haven't tried port 465 yet and EMAIL_PORT is not set, try it now
+      if ((!connectionFailed || !transporter || transporter.options.port === 587) && !process.env.EMAIL_PORT) {
+        try {
+          console.log('Retrying password reset email send on port 465...');
+          transporter = createTransporter(true);
+          
+          const sendPromise = transporter.sendMail(mailOptions);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
+          );
+          
+          const info = await Promise.race([sendPromise, timeoutPromise]);
+          console.log('Password reset email sent successfully on port 465:', info.messageId);
+          return { 
+            success: true,
+            messageId: info.messageId,
+            response: info.response
+          };
+        } catch (retryErr) {
+          console.error('Email send also failed on port 465:', retryErr.message);
+          throw sendErr; // Throw original error
+        }
+      } else {
+        throw sendErr;
+      }
+    }
   } catch (error) {
     const errorDetails = {
       message: error.message,
