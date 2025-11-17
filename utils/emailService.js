@@ -3,6 +3,13 @@ import nodemailer from "nodemailer";
 // Create a transporter with more reliable configuration
 const createTransporter = () => {
   try {
+    // Validate environment variables
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+      throw new Error('EMAIL_USER and EMAIL_PASSWORD environment variables must be set');
+    }
+
+    console.log('Creating email transporter for:', process.env.EMAIL_USER);
+
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
@@ -13,16 +20,11 @@ const createTransporter = () => {
       },
       tls: {
         rejectUnauthorized: false // Only for development/testing
-      }
-    });
-    
-    // Verify connection configuration
-    transporter.verify(function(error, success) {
-      if (error) {
-        console.error('SMTP Connection Error:', error);
-      } else {
-        console.log('SMTP Server is ready to take our messages');
-      }
+      },
+      connectionTimeout: 10000, // 10 seconds
+      greetingTimeout: 10000, // 10 seconds
+      socketTimeout: 10000, // 10 seconds
+      pool: false // Disable pooling for server environments to avoid connection issues
     });
     
     return transporter;
@@ -51,10 +53,34 @@ export const sendVerificationEmail = async (email, code, name) => {
       throw new Error('Invalid email address format');
     }
 
+    // Validate environment variables
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+      throw new Error('Email service is not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.');
+    }
+
     // Create and verify transporter
     transporter = createTransporter();
-    await transporter.verify();
-    console.log('SMTP server connection verified');
+    
+    // Verify connection before sending (with timeout)
+    try {
+      console.log('Verifying SMTP connection...');
+      await Promise.race([
+        transporter.verify(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('SMTP verification timeout')), 10000)
+        )
+      ]);
+      console.log('SMTP server connection verified');
+    } catch (verifyError) {
+      console.error('SMTP verification failed:', {
+        message: verifyError.message,
+        code: verifyError.code,
+        command: verifyError.command,
+        response: verifyError.response
+      });
+      // Don't throw here - try to send anyway as verify can fail but send might work
+      console.warn('SMTP verification failed, but attempting to send email anyway...');
+    }
 
     const mailOptions = {
       from: `"Workstream Automations" <${process.env.EMAIL_USER}>`,
@@ -79,16 +105,17 @@ export const sendVerificationEmail = async (email, code, name) => {
       },
       // Add message configuration
       priority: 'high',
-      dsn: {
-        id: `${Date.now()}`,
-        return: 'headers',
-        notify: ['success', 'failure', 'delay'],
-        recipient: process.env.EMAIL_USER
-      }
     };
 
     console.log('Sending verification email to:', email);
-    const info = await transporter.sendMail(mailOptions);
+    
+    // Send email with timeout
+    const sendPromise = transporter.sendMail(mailOptions);
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
+    );
+    
+    const info = await Promise.race([sendPromise, timeoutPromise]);
     console.log('Email sent successfully:', info.messageId);
     
     return { 
@@ -110,14 +137,18 @@ export const sendVerificationEmail = async (email, code, name) => {
     // More specific error handling
     let userMessage = 'Failed to send verification email';
     
-    if (error.code === 'EAUTH') {
+    if (error.message && error.message.includes('Email service is not configured')) {
+      userMessage = 'Email service is not configured. Please contact support.';
+    } else if (error.message && error.message.includes('SMTP connection failed')) {
+      userMessage = 'Could not connect to email server. Please check your email configuration.';
+    } else if (error.code === 'EAUTH') {
       userMessage = 'Authentication failed. Please check your email credentials.';
     } else if (error.code === 'ECONNECTION') {
       userMessage = 'Could not connect to email server. Please check your internet connection.';
     } else if (error.code === 'EENVELOPE') {
       userMessage = 'Invalid email address or missing required fields.';
-    } else if (error.code === 'EENVELOPE' && error.command === 'API') {
-      userMessage = 'Email service rejected the request. Please check your email configuration.';
+    } else if (error.code === 'ETIMEDOUT') {
+      userMessage = 'Email server connection timed out. Please try again later.';
     }
     
     return { 
@@ -126,9 +157,14 @@ export const sendVerificationEmail = async (email, code, name) => {
       details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
     };
   } finally {
-    // Close the transporter connection if it was created
+    // Close the transporter connection for server environments
+    // This helps avoid connection pool issues on servers
     if (transporter) {
-      transporter.close();
+      try {
+        transporter.close();
+      } catch (closeError) {
+        console.warn('Error closing transporter:', closeError.message);
+      }
     }
   }
 };
@@ -142,10 +178,34 @@ export const sendPasswordResetEmail = async (email, code, name) => {
       throw new Error('Invalid email address format');
     }
 
+    // Validate environment variables
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+      throw new Error('Email service is not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.');
+    }
+
     // Create and verify transporter
     transporter = createTransporter();
-    await transporter.verify();
-    console.log('SMTP server connection verified for password reset');
+    
+    // Verify connection before sending (with timeout)
+    try {
+      console.log('Verifying SMTP connection for password reset...');
+      await Promise.race([
+        transporter.verify(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('SMTP verification timeout')), 10000)
+        )
+      ]);
+      console.log('SMTP server connection verified for password reset');
+    } catch (verifyError) {
+      console.error('SMTP verification failed:', {
+        message: verifyError.message,
+        code: verifyError.code,
+        command: verifyError.command,
+        response: verifyError.response
+      });
+      // Don't throw here - try to send anyway as verify can fail but send might work
+      console.warn('SMTP verification failed, but attempting to send email anyway...');
+    }
 
     const mailOptions = {
       from: `"Workstream Automations" <${process.env.EMAIL_USER}>`,
@@ -169,16 +229,17 @@ export const sendPasswordResetEmail = async (email, code, name) => {
         'X-Auto-Response-Suppress': 'OOF, AutoReply',
       },
       priority: 'high',
-      dsn: {
-        id: `${Date.now()}`,
-        return: 'headers',
-        notify: ['success', 'failure', 'delay'],
-        recipient: process.env.EMAIL_USER
-      }
     };
 
     console.log('Sending password reset email to:', email);
-    const info = await transporter.sendMail(mailOptions);
+    
+    // Send email with timeout
+    const sendPromise = transporter.sendMail(mailOptions);
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000)
+    );
+    
+    const info = await Promise.race([sendPromise, timeoutPromise]);
     console.log('Password reset email sent successfully:', info.messageId);
     
     return { 
@@ -200,14 +261,18 @@ export const sendPasswordResetEmail = async (email, code, name) => {
     // More specific error handling
     let userMessage = 'Failed to send password reset email';
     
-    if (error.code === 'EAUTH') {
+    if (error.message && error.message.includes('Email service is not configured')) {
+      userMessage = 'Email service is not configured. Please contact support.';
+    } else if (error.message && error.message.includes('SMTP connection failed')) {
+      userMessage = 'Could not connect to email server. Please check your email configuration.';
+    } else if (error.code === 'EAUTH') {
       userMessage = 'Authentication failed. Please check your email credentials.';
     } else if (error.code === 'ECONNECTION') {
       userMessage = 'Could not connect to email server. Please check your internet connection.';
     } else if (error.code === 'EENVELOPE') {
       userMessage = 'Invalid email address or missing required fields.';
-    } else if (error.code === 'EENVELOPE' && error.command === 'API') {
-      userMessage = 'Email service rejected the request. Please check your email configuration.';
+    } else if (error.code === 'ETIMEDOUT') {
+      userMessage = 'Email server connection timed out. Please try again later.';
     }
     
     return { 
@@ -216,9 +281,14 @@ export const sendPasswordResetEmail = async (email, code, name) => {
       details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
     };
   } finally {
-    // Close the transporter connection if it was created
+    // Close the transporter connection for server environments
+    // This helps avoid connection pool issues on servers
     if (transporter) {
-      transporter.close();
+      try {
+        transporter.close();
+      } catch (closeError) {
+        console.warn('Error closing transporter:', closeError.message);
+      }
     }
   }
 };
