@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { createAppointment, updateAppointment, getAppointmentById, getAllAppointments, } from "../controllers/appointmentController.js";
 import authMiddleware from "../middleware/authMiddleware.js";
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 const router = Router();
 
@@ -11,3 +14,4 @@ router.get("/:id", authMiddleware, getAppointmentById);
 router.get("/", authMiddleware, getAllAppointments);
 
 export default router;
+

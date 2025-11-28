@@ -19,9 +19,9 @@ const port = process.env.PORT || 5000;
 
 app.use(express.json());
 
-// CORS: allow frontend apps on localhost:3000 and localhost:8081
+// CORS: allow all origins for Replit environment
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:8081'],
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -39,6 +39,14 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/notifications", notificationRoutes);
 
 
-app.listen(port, () => {
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
 });
+
+// Set server timeout (default: 10 minutes, configurable via env)
+const serverTimeout = parseInt(process.env.SERVER_TIMEOUT) || 600000; // 10 minutes in milliseconds
+server.timeout = serverTimeout;
+server.keepAliveTimeout = 65000; // Keep-alive timeout
+server.headersTimeout = 66000; // Headers timeout (should be > keepAliveTimeout)
+
+console.log(`Server timeout set to ${serverTimeout / 1000} seconds`);

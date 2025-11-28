@@ -10,13 +10,9 @@ const sessionSchema = new mongoose.Schema(
         token: {
             type: String,
             required: true,
-            index: true,
-            unique: true
         },
         refreshToken: {
             type: String,
-            index: true,
-            unique: true,
             sparse: true
         },
         deviceInfo: {
@@ -72,7 +68,6 @@ sessionSchema.index({ token: 1 }, { unique: true });
 sessionSchema.index({ refreshToken: 1 }, { unique: true, sparse: true });
 sessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 sessionSchema.index({ "location.coordinates": "2dsphere" });
-sessionSchema.index({ userId: 1, isActive: 1 });
 
 // Instance Methods
 sessionSchema.methods.isExpired = function () {
