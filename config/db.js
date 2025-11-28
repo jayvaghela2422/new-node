@@ -7,11 +7,16 @@ dotenv.config();
 const connectDB = async () => {
     try {
         await mongoose.connect(process.env.MONGO_URI);
-        console.log("MongoDB connected...");
+        console.log("✅ MongoDB connected successfully");
         startSessionCleanup();
     } catch (error) {
-        console.error("Error connecting to MongoDB:", error);
-        process.exit(1);
+        console.error("❌ Error connecting to MongoDB:", error.message);
+        console.error("\n⚠️  IMPORTANT: If using MongoDB Atlas, you need to whitelist Replit's IP addresses:");
+        console.error("   1. Go to your MongoDB Atlas cluster");
+        console.error("   2. Navigate to Network Access");
+        console.error("   3. Add IP Address: 0.0.0.0/0 (allow access from anywhere)");
+        console.error("   4. Or add specific Replit IP ranges for better security\n");
+        console.error("⚠️  Server will continue running but database operations will fail until connected.\n");
     }
 };
 
